@@ -1,0 +1,35 @@
+name: Taskflow frontend CD
+
+on:
+    workflow_run:
+        workflows: ["Taskflow frontend CI"]
+        types:
+            - completed
+
+permissions:
+    contents: read
+    id-token: write
+    actions: read
+
+jobs:
+  on_success:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' &&  github.event.workflow_run.head_branch == 'master' }}
+    steps:
+        - name: Download build artifacts
+          uses: actions/download-artifact@v8
+          with:
+            name: frontend-build
+            path: dist/
+            run-id: ${{ github.event.workflow_run.id }}
+            github-token: ${{ secrets.GITHUB_TOKEN }}
+        - name: Configure AWS credentials
+          uses: aws-actions/configure-aws-credentials@v6.3.0
+          with:
+            role-to-assume: ${{ vars.AWS_ROLE_ARN_CD }}
+            aws-region: ${{ vars.AWS_REGION }}
+        - name: Upload to S3
+          run: |
+            aws s3 sync dist/ s3://${{ vars.S3_BUCKET_NAME }}/ --delete
+        
+      
