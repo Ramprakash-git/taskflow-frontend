@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 
 import {
   Activity,
@@ -15,6 +22,7 @@ import {
   LayoutDashboard,
   ListChecks,
   LogOut,
+  MoreHorizontal,
   Plus,
   Search,
   Settings2,
@@ -22,6 +30,8 @@ import {
   Sparkles,
   X,
   Zap,
+  Pencil,
+  Trash2,
 } from "lucide-react";
 
 import {
@@ -63,9 +73,7 @@ type ApiTaskPayload = {
   project: string;
 };
 
-function toFrontendStatus(
-  status: ApiTask["status"]
-): TaskStatus {
+function toFrontendStatus(status: ApiTask["status"]): TaskStatus {
   switch (status) {
     case "pending":
       return "Todo";
@@ -76,9 +84,7 @@ function toFrontendStatus(
   }
 }
 
-function toBackendStatus(
-  status: TaskStatus
-): ApiTask["status"] {
+function toBackendStatus(status: TaskStatus): ApiTask["status"] {
   switch (status) {
     case "Todo":
       return "pending";
@@ -106,7 +112,6 @@ async function apiRequest<T>(
   options: RequestInit = {}
 ): Promise<T> {
   const session = await fetchAuthSession();
-
   const accessToken = session.tokens?.accessToken?.toString();
 
   if (!accessToken) {
@@ -125,11 +130,10 @@ async function apiRequest<T>(
   if (!response.ok) {
     const errorBody = await response.json().catch(() => null);
 
-    const message =
+    throw new Error(
       errorBody?.detail ??
-      `API request failed with status ${response.status}`;
-
-    throw new Error(message);
+        `API request failed with status ${response.status}`
+    );
   }
 
   if (response.status === 204) {
@@ -156,9 +160,21 @@ function App() {
   const [activeFilter, setActiveFilter] =
     useState<FilterKey>("All tasks");
 
+  const [selectedProject, setSelectedProject] = useState<string | null>(
+    null
+  );
+
   const [search, setSearch] = useState("");
 
   const [showCreate, setShowCreate] = useState(false);
+
+  const [editingTask, setEditingTask] = useState<Task | null>(null);
+
+  const [openTaskMenu, setOpenTaskMenu] = useState<string | null>(null);
+
+  const [profileOpen, setProfileOpen] = useState(false);
+
+  const [notificationOpen, setNotificationOpen] = useState(false);
 
   const [notice, setNotice] = useState("");
 
@@ -175,7 +191,9 @@ function App() {
 
   const [taskError, setTaskError] = useState("");
 
-  // Check whether the user already has a Cognito session.
+  const profileRef = useRef<HTMLDivElement>(null);
+
+  // Check the existing Cognito session.
   useEffect(() => {
     let active = true;
 
@@ -208,7 +226,25 @@ function App() {
     };
   }, []);
 
-  // Load tasks whenever the authenticated state becomes true.
+  // Close the profile dropdown when clicking outside it.
+  useEffect(() => {
+    function handleOutsideClick(event: MouseEvent) {
+      if (
+        profileRef.current &&
+        !profileRef.current.contains(event.target as Node)
+      ) {
+        setProfileOpen(false);
+      }
+    }
+
+    document.addEventListener("mousedown", handleOutsideClick);
+
+    return () => {
+      document.removeEventListener("mousedown", handleOutsideClick);
+    };
+  }, []);
+
+  // Load tasks from the backend.
   useEffect(() => {
     if (!isAuthenticated) {
       return;
@@ -248,7 +284,18 @@ function App() {
     };
   }, [isAuthenticated]);
 
-  // Called after successful login.
+  // Show temporary messages.
+  function showNotice(message: string) {
+    setNotice(message);
+
+    window.setTimeout(() => {
+      setNotice((current) =>
+        current === message ? "" : current
+      );
+    }, 3500);
+  }
+
+  // Successful login.
   async function handleLogin() {
     try {
       const user = await getCurrentUser();
@@ -259,11 +306,11 @@ function App() {
 
       setIsAuthenticated(true);
     } catch {
-      setNotice("Unable to retrieve your account session.");
+      showNotice("Unable to retrieve your account session.");
     }
   }
 
-  // End the Cognito session.
+  // Cognito logout.
   async function handleLogout() {
     try {
       await signOut();
@@ -271,11 +318,24 @@ function App() {
       setIsAuthenticated(false);
       setCurrentUserEmail("");
       setTasks([]);
+      setProfileOpen(false);
+      setSelectedProject(null);
+      setActiveFilter("All tasks");
+      setSearch("");
       setAuthView("login");
     } catch {
-      setNotice("Unable to sign out. Please try again.");
+      showNotice("Unable to sign out. Please try again.");
     }
   }
+
+  // Projects are derived from the user's actual tasks.
+  const projects = useMemo(() => {
+    const projectNames = Array.from(
+      new Set(tasks.map((task) => task.project).filter(Boolean))
+    );
+
+    return projectNames.sort((a, b) => a.localeCompare(b));
+  }, [tasks]);
 
   const visibleTasks = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -285,15 +345,18 @@ function App() {
         activeFilter === "All tasks" ||
         task.status === activeFilter;
 
+      const matchesProject =
+        !selectedProject || task.project === selectedProject;
+
       const matchesSearch =
         !query ||
         `${task.title} ${task.description} ${task.project} ${task.id}`
           .toLowerCase()
           .includes(query);
 
-      return matchesFilter && matchesSearch;
+      return matchesFilter && matchesProject && matchesSearch;
     });
-  }, [tasks, activeFilter, search]);
+  }, [tasks, activeFilter, selectedProject, search]);
 
   const completed = tasks.filter(
     (task) => task.status === "Done"
@@ -308,7 +371,7 @@ function App() {
       task.priority === "High" && task.status !== "Done"
   ).length;
 
-  // Update task status in PostgreSQL.
+  // Update a task's status.
   async function updateStatus(id: string, status: TaskStatus) {
     try {
       const updatedTask = await apiRequest<ApiTask>(
@@ -327,19 +390,17 @@ function App() {
         )
       );
 
-      setNotice("Task status updated in database.");
+      showNotice("Task status updated.");
     } catch (error) {
-      setNotice(
+      showNotice(
         error instanceof Error
           ? error.message
           : "Unable to update task."
       );
     }
-
-    window.setTimeout(() => setNotice(""), 3000);
   }
 
-  // Create a task in PostgreSQL.
+  // Create a task.
   async function createTask(values: Omit<Task, "id">) {
     try {
       const payload: ApiTaskPayload = {
@@ -365,19 +426,113 @@ function App() {
       ]);
 
       setActiveFilter("All tasks");
+      setSelectedProject(null);
       setSearch("");
       setShowCreate(false);
 
-      setNotice("Task created successfully.");
+      showNotice("Task created successfully.");
     } catch (error) {
-      setNotice(
+      showNotice(
         error instanceof Error
           ? error.message
           : "Unable to create task."
       );
     }
+  }
 
-    window.setTimeout(() => setNotice(""), 3000);
+  // Edit a task.
+  async function editTask(values: Omit<Task, "id">) {
+    if (!editingTask) {
+      return;
+    }
+
+    try {
+      const payload: ApiTaskPayload = {
+        title: values.title,
+        description: values.description,
+        status: toBackendStatus(values.status),
+        priority: values.priority,
+        due_date: values.dueDate || null,
+        project: values.project,
+      };
+
+      const updatedTask = await apiRequest<ApiTask>(
+        `/api/tasks/${editingTask.id}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify(payload),
+        }
+      );
+
+      setTasks((current) =>
+        current.map((task) =>
+          task.id === editingTask.id
+            ? mapApiTask(updatedTask)
+            : task
+        )
+      );
+
+      setEditingTask(null);
+      setOpenTaskMenu(null);
+
+      showNotice("Task updated successfully.");
+    } catch (error) {
+      showNotice(
+        error instanceof Error
+          ? error.message
+          : "Unable to edit task."
+      );
+    }
+  }
+
+  // Delete a task.
+  async function deleteTask(task: Task) {
+    const confirmed = window.confirm(
+      `Are you sure you want to delete "${task.title}"?`
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      await apiRequest<void>(`/api/tasks/${task.id}`, {
+        method: "DELETE",
+      });
+
+      setTasks((current) =>
+        current.filter((item) => item.id !== task.id)
+      );
+
+      setOpenTaskMenu(null);
+
+      showNotice("Task deleted successfully.");
+    } catch (error) {
+      showNotice(
+        error instanceof Error
+          ? error.message
+          : "Unable to delete task."
+      );
+    }
+  }
+
+  function resetView() {
+    setActiveFilter("All tasks");
+    setSelectedProject(null);
+    setSearch("");
+  }
+
+  function getProjectColor(project: string) {
+    switch (project.toLowerCase()) {
+      case "infrastructure":
+        return "blue";
+      case "backend":
+        return "orange";
+      case "devops":
+        return "green";
+      default:
+        return "purple";
+    }
   }
 
   if (authLoading) {
@@ -440,28 +595,49 @@ function App() {
         <div className="nav-label">WORKSPACE</div>
 
         <nav className="main-nav" aria-label="Main navigation">
-          <button className="nav-item active">
+          <button
+            className={`nav-item ${
+              !selectedProject && activeFilter === "All tasks"
+                ? "active"
+                : ""
+            }`}
+            onClick={resetView}
+          >
             <LayoutDashboard size={18} /> Overview
           </button>
 
           <button
-            className="nav-item"
-            onClick={() => setActiveFilter("All tasks")}
+            className={`nav-item ${
+              activeFilter === "All tasks" && !selectedProject
+                ? "active"
+                : ""
+            }`}
+            onClick={resetView}
           >
             <ClipboardList size={18} /> My tasks
             <span className="nav-count">{tasks.length}</span>
           </button>
 
           <button
-            className="nav-item"
-            onClick={() => setActiveFilter("In progress")}
+            className={`nav-item ${
+              activeFilter === "In progress" ? "active" : ""
+            }`}
+            onClick={() => {
+              setSelectedProject(null);
+              setActiveFilter("In progress");
+            }}
           >
             <Clock3 size={18} /> In progress
           </button>
 
           <button
-            className="nav-item"
-            onClick={() => setActiveFilter("Done")}
+            className={`nav-item ${
+              activeFilter === "Done" ? "active" : ""
+            }`}
+            onClick={() => {
+              setSelectedProject(null);
+              setActiveFilter("Done");
+            }}
           >
             <Check size={18} /> Completed
           </button>
@@ -469,25 +645,53 @@ function App() {
 
         <div className="nav-label project-label">
           YOUR PROJECTS
-          <button aria-label="Project settings">
+
+          <button
+            aria-label="Create task for a project"
+            title="Create a task"
+            onClick={() => setShowCreate(true)}
+          >
             <Plus size={15} />
           </button>
         </div>
 
-        <div className="project-link">
-          <span className="project-dot purple" /> TaskFlow
-          <span className="project-number">3</span>
-        </div>
+        {projects.map((project) => {
+          const projectTasks = tasks.filter(
+            (task) => task.project === project
+          );
 
-        <div className="project-link">
-          <span className="project-dot blue" /> Infrastructure
-          <span className="project-number">1</span>
-        </div>
+          return (
+            <button
+              key={project}
+              className={`project-link project-link-button ${
+                selectedProject === project ? "selected-project" : ""
+              }`}
+              onClick={() => {
+                setSelectedProject(
+                  selectedProject === project ? null : project
+                );
 
-        <div className="project-link">
-          <span className="project-dot orange" /> Backend
-          <span className="project-number">1</span>
-        </div>
+                setActiveFilter("All tasks");
+              }}
+            >
+              <span
+                className={`project-dot ${getProjectColor(project)}`}
+              />
+
+              {project}
+
+              <span className="project-number">
+                {projectTasks.length}
+              </span>
+            </button>
+          );
+        })}
+
+        {projects.length === 0 && (
+          <div className="project-link">
+            No projects yet
+          </div>
+        )}
 
         <div className="sidebar-bottom">
           <div className="upgrade-card">
@@ -510,11 +714,21 @@ function App() {
             </span>
           </div>
 
-          <button className="nav-item bottom-nav">
+          <button
+            className="nav-item bottom-nav"
+            onClick={() =>
+              showNotice("For support, contact your TaskFlow administrator.")
+            }
+          >
             <CircleHelp size={18} /> Help & support
           </button>
 
-          <button className="nav-item bottom-nav">
+          <button
+            className="nav-item bottom-nav"
+            onClick={() =>
+              showNotice("Account settings are not available yet.")
+            }
+          >
             <Settings2 size={18} /> Settings
           </button>
 
@@ -543,7 +757,12 @@ function App() {
       <main className="main-content">
         <header className="topbar">
           <div className="breadcrumb">
-            Workspace <span>/</span> <strong>Overview</strong>
+            Workspace <span>/</span>{" "}
+            <strong>
+              {selectedProject ?? activeFilter === "All tasks"
+                ? selectedProject ?? "Overview"
+                : activeFilter}
+            </strong>
           </div>
 
           <div className="topbar-actions">
@@ -551,18 +770,68 @@ function App() {
               <span /> API CONNECTED
             </div>
 
-            <button
-              className="icon-button notification-button"
-              aria-label="Notifications"
-            >
-              <Bell size={18} />
-              <i />
-            </button>
+            <div className="dropdown-container">
+              <button
+                className="icon-button notification-button"
+                aria-label="Notifications"
+                title="Notifications"
+                onClick={() => {
+                  setNotificationOpen(!notificationOpen);
+                  setProfileOpen(false);
+                }}
+              >
+                <Bell size={18} />
+                <i />
+              </button>
+
+              {notificationOpen && (
+                <div className="dropdown-menu notification-menu">
+                  <strong>Notifications</strong>
+                  <p>You are all caught up.</p>
+                  <span>No new notifications.</span>
+                </div>
+              )}
+            </div>
 
             <div className="topbar-divider" />
 
-            <div className="mini-avatar">
-              {currentUserEmail.slice(0, 2).toUpperCase()}
+            <div className="dropdown-container" ref={profileRef}>
+              <button
+                className="mini-avatar profile-trigger"
+                aria-label="Open profile menu"
+                aria-expanded={profileOpen}
+                onClick={() => {
+                  setProfileOpen(!profileOpen);
+                  setNotificationOpen(false);
+                }}
+              >
+                {currentUserEmail.slice(0, 2).toUpperCase()}
+              </button>
+
+              {profileOpen && (
+                <div className="dropdown-menu profile-menu">
+                  <div className="dropdown-user">
+                    <div className="profile-avatar">
+                      {currentUserEmail.slice(0, 2).toUpperCase()}
+                    </div>
+
+                    <div>
+                      <strong>{currentUserEmail}</strong>
+                      <span>Personal workspace</span>
+                    </div>
+                  </div>
+
+                  <div className="dropdown-divider" />
+
+                  <button
+                    onClick={handleLogout}
+                    className="dropdown-action logout-action"
+                  >
+                    <LogOut size={16} />
+                    Sign out
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </header>
@@ -632,16 +901,16 @@ function App() {
           <section className="work-panel">
             <div className="panel-heading">
               <div>
-                <h2>Your tasks</h2>
+                <h2>
+                  {selectedProject ? `${selectedProject} tasks` : "Your tasks"}
+                </h2>
+
                 <p>Keep the important things moving forward.</p>
               </div>
 
               <button
                 className="secondary-button"
-                onClick={() => {
-                  setSearch("");
-                  setActiveFilter("All tasks");
-                }}
+                onClick={resetView}
               >
                 <ArrowDownUp size={15} /> Reset view
               </button>
@@ -678,15 +947,14 @@ function App() {
 
                   <input
                     value={search}
-                    onChange={(event) =>
-                      setSearch(event.target.value)
-                    }
+                    onChange={(event) => setSearch(event.target.value)}
                     placeholder="Search tasks..."
                     aria-label="Search tasks"
                   />
 
                   {search && (
                     <button
+                      type="button"
                       aria-label="Clear search"
                       onClick={() => setSearch("")}
                     >
@@ -698,8 +966,11 @@ function App() {
                 <button
                   className="square-button"
                   aria-label="Filter options"
+                  title="Filter options"
                   onClick={() =>
-                    setNotice("Choose a status tab to filter tasks.")
+                    showNotice(
+                      "Use the status tabs or project names to filter your tasks."
+                    )
                   }
                 >
                   <Filter size={16} />
@@ -711,6 +982,7 @@ function App() {
               <div role="alert" className="empty-state">
                 <strong>Unable to load tasks</strong>
                 <span>{taskError}</span>
+
                 <button
                   className="secondary-button"
                   onClick={() => window.location.reload()}
@@ -747,15 +1019,30 @@ function App() {
                       <tr key={task.id}>
                         <td>
                           <div className="task-name-cell">
-                            <span
+                            <button
+                              type="button"
                               className={`task-check ${
                                 task.status === "Done" ? "checked" : ""
                               }`}
+                              title="Toggle completion"
+                              aria-label={`Mark ${task.title} ${
+                                task.status === "Done"
+                                  ? "in progress"
+                                  : "completed"
+                              }`}
+                              onClick={() =>
+                                updateStatus(
+                                  task.id,
+                                  task.status === "Done"
+                                    ? "Todo"
+                                    : "Done"
+                                )
+                              }
                             >
                               {task.status === "Done" && (
                                 <Check size={12} />
                               )}
-                            </span>
+                            </button>
 
                             <div className="task-title-copy">
                               <strong
@@ -776,16 +1063,11 @@ function App() {
                         <td>
                           <span className="project-cell">
                             <span
-                              className={`project-dot ${
-                                task.project === "Infrastructure"
-                                  ? "blue"
-                                  : task.project === "Backend"
-                                    ? "orange"
-                                    : task.project === "DevOps"
-                                      ? "green"
-                                      : "purple"
-                              }`}
+                              className={`project-dot ${getProjectColor(
+                                task.project
+                              )}`}
                             />
+
                             {task.project}
                           </span>
                         </td>
@@ -820,19 +1102,45 @@ function App() {
                           </span>
                         </td>
 
-                        <td>
-                          <button
-                            className="row-more"
-                            title={task.description}
-                            aria-label={`Details for ${task.title}`}
-                            onClick={() =>
-                              setNotice(
-                                task.description || "No description provided."
-                              )
-                            }
-                          >
-                            <span>···</span>
-                          </button>
+                        <td className="task-action-cell">
+                          <div className="dropdown-container">
+                            <button
+                              type="button"
+                              className="row-more"
+                              title="Task actions"
+                              aria-label={`Actions for ${task.title}`}
+                              onClick={() =>
+                                setOpenTaskMenu(
+                                  openTaskMenu === task.id ? null : task.id
+                                )
+                              }
+                            >
+                              <MoreHorizontal size={18} />
+                            </button>
+
+                            {openTaskMenu === task.id && (
+                              <div className="dropdown-menu task-menu">
+                                <button
+                                  className="dropdown-action"
+                                  onClick={() => {
+                                    setEditingTask(task);
+                                    setOpenTaskMenu(null);
+                                  }}
+                                >
+                                  <Pencil size={14} />
+                                  Edit task
+                                </button>
+
+                                <button
+                                  className="dropdown-action delete-action"
+                                  onClick={() => deleteTask(task)}
+                                >
+                                  <Trash2 size={14} />
+                                  Delete task
+                                </button>
+                              </div>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -843,6 +1151,7 @@ function App() {
                           <div className="empty-state">
                             <Search size={22} />
                             <strong>No tasks found</strong>
+
                             <span>
                               Try another search or change the selected
                               filter.
@@ -942,9 +1251,22 @@ function App() {
       )}
 
       {showCreate && (
-        <CreateTaskModal
+        <TaskFormModal
+          title="Create a task"
+          kicker="TASKFLOW / NEW ITEM"
+          initialTask={null}
           onClose={() => setShowCreate(false)}
-          onCreate={createTask}
+          onSave={createTask}
+        />
+      )}
+
+      {editingTask && (
+        <TaskFormModal
+          title="Edit task"
+          kicker="TASKFLOW / EDIT ITEM"
+          initialTask={editingTask}
+          onClose={() => setEditingTask(null)}
+          onSave={editTask}
         />
       )}
     </div>
@@ -961,7 +1283,7 @@ function StatCard({
   label: string;
   value: number;
   detail: string;
-  icon: React.ReactNode;
+  icon: ReactNode;
   tone: string;
 }) {
   return (
@@ -984,38 +1306,62 @@ function PriorityBadge({ priority }: { priority: Priority }) {
   );
 }
 
-function CreateTaskModal({
+function TaskFormModal({
+  title,
+  kicker,
+  initialTask,
   onClose,
-  onCreate,
+  onSave,
 }: {
+  title: string;
+  kicker: string;
+  initialTask: Task | null;
   onClose: () => void;
-  onCreate: (task: Omit<Task, "id">) => Promise<void>;
+  onSave: (task: Omit<Task, "id">) => Promise<void>;
 }) {
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
-  const [project, setProject] = useState("TaskFlow");
-  const [priority, setPriority] = useState<Priority>("Medium");
-  const [dueDate, setDueDate] = useState("");
+  const [taskTitle, setTaskTitle] = useState(
+    initialTask?.title ?? ""
+  );
+
+  const [description, setDescription] = useState(
+    initialTask?.description ?? ""
+  );
+
+  const [project, setProject] = useState(
+    initialTask?.project ?? "TaskFlow"
+  );
+
+  const [priority, setPriority] = useState<Priority>(
+    initialTask?.priority ?? "Medium"
+  );
+
+  const [status, setStatus] = useState<TaskStatus>(
+    initialTask?.status ?? "Todo"
+  );
+
+  const [dueDate, setDueDate] = useState(
+    initialTask?.dueDate ?? ""
+  );
 
   const [submitting, setSubmitting] = useState(false);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    if (!title.trim()) {
+    if (!taskTitle.trim()) {
       return;
     }
 
     setSubmitting(true);
 
     try {
-      await onCreate({
-        title: title.trim(),
+      await onSave({
+        title: taskTitle.trim(),
         description: description.trim(),
-        project,
+        project: project.trim() || "General",
         priority,
         dueDate,
-        status: "Todo",
+        status,
       });
     } finally {
       setSubmitting(false);
@@ -1026,7 +1372,7 @@ function CreateTaskModal({
     <div
       className="modal-backdrop"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
+        if (event.target === event.currentTarget && !submitting) {
           onClose();
         }
       }}
@@ -1034,9 +1380,14 @@ function CreateTaskModal({
       <form className="create-modal" onSubmit={handleSubmit}>
         <div className="modal-header">
           <div>
-            <span className="modal-kicker">TASKFLOW / NEW ITEM</span>
-            <h2>Create a task</h2>
-            <p>Give your next piece of work a clear starting point.</p>
+            <span className="modal-kicker">{kicker}</span>
+            <h2>{title}</h2>
+
+            <p>
+              {initialTask
+                ? "Update the details of this task."
+                : "Give your next piece of work a clear starting point."}
+            </p>
           </div>
 
           <button
@@ -1044,6 +1395,7 @@ function CreateTaskModal({
             className="icon-button"
             onClick={onClose}
             aria-label="Close modal"
+            disabled={submitting}
           >
             <X size={18} />
           </button>
@@ -1056,8 +1408,8 @@ function CreateTaskModal({
             autoFocus
             required
             maxLength={200}
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
+            value={taskTitle}
+            onChange={(event) => setTaskTitle(event.target.value)}
             placeholder="What needs to get done?"
           />
         </label>
@@ -1078,15 +1430,20 @@ function CreateTaskModal({
           <label className="form-label">
             Project
 
-            <select
+            <input
+              list="taskflow-project-options"
+              maxLength={100}
               value={project}
               onChange={(event) => setProject(event.target.value)}
-            >
-              <option>TaskFlow</option>
-              <option>Infrastructure</option>
-              <option>Backend</option>
-              <option>DevOps</option>
-            </select>
+              placeholder="Enter a project"
+            />
+
+            <datalist id="taskflow-project-options">
+              <option value="TaskFlow" />
+              <option value="Infrastructure" />
+              <option value="Backend" />
+              <option value="DevOps" />
+            </datalist>
           </label>
 
           <label className="form-label">
@@ -1105,15 +1462,32 @@ function CreateTaskModal({
           </label>
         </div>
 
-        <label className="form-label">
-          Due date <span className="optional-label">Optional</span>
+        <div className="form-two-col">
+          <label className="form-label">
+            Status
 
-          <input
-            type="date"
-            value={dueDate}
-            onChange={(event) => setDueDate(event.target.value)}
-          />
-        </label>
+            <select
+              value={status}
+              onChange={(event) =>
+                setStatus(event.target.value as TaskStatus)
+              }
+            >
+              <option>Todo</option>
+              <option>In progress</option>
+              <option>Done</option>
+            </select>
+          </label>
+
+          <label className="form-label">
+            Due date <span className="optional-label">Optional</span>
+
+            <input
+              type="date"
+              value={dueDate}
+              onChange={(event) => setDueDate(event.target.value)}
+            />
+          </label>
+        </div>
 
         <div className="modal-actions">
           <button
@@ -1130,8 +1504,17 @@ function CreateTaskModal({
             className="primary-button"
             disabled={submitting}
           >
-            <Plus size={16} />
-            {submitting ? "Creating..." : "Create task"}
+            {initialTask ? (
+              <Pencil size={15} />
+            ) : (
+              <Plus size={16} />
+            )}
+
+            {submitting
+              ? "Saving..."
+              : initialTask
+                ? "Save changes"
+                : "Create task"}
           </button>
         </div>
       </form>
