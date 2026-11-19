@@ -390,7 +390,7 @@ function App() {
         )
       );
 
-      showNotice("Task status updated.");
+      showNotice("Task status updated in database.");
     } catch (error) {
       showNotice(
         error instanceof Error
